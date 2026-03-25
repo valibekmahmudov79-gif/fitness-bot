@@ -1,20 +1,10 @@
-"""
-bot.py — Telegram бот с РЕАЛЬНОЙ оплатой через Telegram Stars
-═══════════════════════════════════════════════════════════════
-Telegram Stars — встроенная платёжная система Telegram.
-• Не нужна регистрация ИП или компании
-• Не нужны API-ключи платёжных систем
-• Деньги приходят прямо в твой бот
-• Работает во всех странах мира
-
-Как вывести Stars в деньги:
-  @BotFather → выбери бота → Bot Payments → Withdraw Stars
-"""
-
+```python
 import asyncio
 import logging
 import os
 from dotenv import load_dotenv
+
+from aiohttp import web  # ← ДОБАВИЛ
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
@@ -32,21 +22,16 @@ from ai_service import generate_workout_plan
 
 load_dotenv()
 
-# ─── Логирование ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ─── Конфиг ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-
-# Цена в Telegram Stars (1 Star ≈ $0.013)
-# 350 Stars ≈ $4.5
 PRICE_IN_STARS = 350
 
-# ─── FSM состояния ──────────────────────────────────────────────────────────────
+
 class UserForm(StatesGroup):
     age    = State()
     height = State()
@@ -54,15 +39,10 @@ class UserForm(StatesGroup):
     goal   = State()
 
 
-# ─── Инициализация ───────────────────────────────────────────────────────────────
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 db  = Database()
 
-
-# ══════════════════════════════════════════════════════════════════════════════════
-#  ШАГ 1-4: Сбор данных пользователя
-# ══════════════════════════════════════════════════════════════════════════════════
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -125,10 +105,6 @@ async def process_weight(message: types.Message, state: FSMContext):
     await state.set_state(UserForm.goal)
 
 
-# ══════════════════════════════════════════════════════════════════════════════════
-#  ШАГ 5: Создание заказа и отправка инвойса Telegram Stars
-# ══════════════════════════════════════════════════════════════════════════════════
-
 @dp.callback_query(UserForm.goal, F.data.startswith("goal_"))
 async def process_goal(callback: types.CallbackQuery, state: FSMContext):
     goal_map = {
@@ -141,7 +117,6 @@ async def process_goal(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.clear()
 
-    # ─── Сохраняем заказ в БД (статус: pending) ────────────────────────────────
     order_id = await db.create_order(
         user_id=callback.from_user.id,
         age=data["age"],
@@ -149,170 +124,72 @@ async def process_goal(callback: types.CallbackQuery, state: FSMContext):
         weight=data["weight"],
         goal=goal,
         amount=PRICE_IN_STARS,
-        currency="XTR",   # XTR = официальный код Telegram Stars
+        currency="XTR",
     )
 
     await callback.message.edit_text(
-        f"✅ <b>Отлично! Твои данные записаны:</b>\n\n"
-        f"• Возраст: {data['age']} лет\n"
-        f"• Рост: {data['height']} см\n"
-        f"• Вес: {data['weight']} кг\n"
-        f"• Цель: {goal}\n\n"
-        f"⏳ Отправляю счёт на оплату...",
+        f"✅ Данные сохранены. Отправляю счёт...",
         parse_mode="HTML"
     )
 
-    # ─── Отправляем РЕАЛЬНЫЙ инвойс Telegram Stars ─────────────────────────────
-    # Никакого redirect, никакого внешнего сайта —
-    # окно оплаты открывается прямо внутри Telegram!
     await bot.send_invoice(
         chat_id=callback.from_user.id,
-        title="🏋️ Персональная программа тренировок",
-        description=(
-            f"Индивидуальный план на 4 недели\n"
-            f"Цель: {goal}\n"
-            f"Составлен специально под твои параметры"
-        ),
-        payload=str(order_id),   # вернётся в successful_payment
-        currency="XTR",          # XTR = Telegram Stars
-        prices=[
-            LabeledPrice(
-                label="Программа тренировок",
-                amount=PRICE_IN_STARS
-            )
-        ],
+        title="Программа",
+        description=f"Цель: {goal}",
+        payload=str(order_id),
+        currency="XTR",
+        prices=[LabeledPrice(label="Программа", amount=PRICE_IN_STARS)],
     )
 
-
-# ══════════════════════════════════════════════════════════════════════════════════
-#  ШАГ 6: Pre-checkout — Telegram требует ответа в течение 10 секунд!
-# ══════════════════════════════════════════════════════════════════════════════════
 
 @dp.pre_checkout_query()
 async def pre_checkout(query: types.PreCheckoutQuery):
-    """
-    Telegram отправляет этот запрос ПЕРЕД списанием Stars.
-    Нужно ответить ok=True в течение 10 секунд.
-    Здесь проверяем что заказ актуален.
-    """
-    order_id = int(query.invoice_payload)
-    order = await db.get_order(order_id)
-
-    if not order:
-        await query.answer(ok=False, error_message="Заказ не найден. Начни заново: /start")
-        return
-
-    if order["status"] == "paid":
-        await query.answer(ok=False, error_message="Этот заказ уже оплачен!")
-        return
-
-    # Всё ок — разрешаем списание Stars
     await query.answer(ok=True)
-    logger.info(f"Pre-checkout OK for order {order_id}")
 
-
-# ══════════════════════════════════════════════════════════════════════════════════
-#  ШАГ 7: Оплата прошла — Stars списаны, выдаём программу автоматически!
-# ══════════════════════════════════════════════════════════════════════════════════
 
 @dp.message(F.successful_payment)
 async def payment_received(message: types.Message):
-    """
-    Вызывается АВТОМАТИЧЕСКИ после успешной оплаты.
-    Никакого webhook, ngrok или внешнего сервера не нужно —
-    всё работает через Telegram напрямую.
-    """
-    payment = message.successful_payment
-    order_id = int(payment.invoice_payload)
+    order_id = int(message.successful_payment.invoice_payload)
 
-    logger.info(
-        f"PAYMENT RECEIVED: order={order_id} "
-        f"stars={payment.total_amount} "
-        f"charge_id={payment.telegram_payment_charge_id}"
-    )
-
-    # ─── 1. Обновляем статус заказа ────────────────────────────────────────────
-    await db.mark_order_paid(
-        order_id=order_id,
-        telegram_charge_id=payment.telegram_payment_charge_id
-    )
-
-    # ─── 2. Подтверждаем оплату пользователю ───────────────────────────────────
-    await message.answer(
-        f"🎉 <b>Оплата прошла успешно!</b>\n\n"
-        f"Получено: <b>{payment.total_amount} ⭐️</b>\n\n"
-        f"⏳ Генерирую твою персональную программу...\n"
-        f"Это займёт несколько секунд.",
-        parse_mode="HTML"
-    )
-
-    # ─── 3. Генерируем программу тренировок ────────────────────────────────────
+    await db.mark_order_paid(order_id)
     order = await db.get_order(order_id)
 
-    try:
-        plan = await generate_workout_plan(
-            age=order["age"],
-            height=order["height"],
-            weight=order["weight"],
-            goal=order["goal"],
-        )
-
-        await message.answer(
-            f"🏋️ <b>ТВОЯ ПЕРСОНАЛЬНАЯ ПРОГРАММА ТРЕНИРОВОК</b>\n\n{plan}",
-            parse_mode="HTML"
-        )
-
-        await db.mark_plan_sent(order_id)
-        logger.info(f"Plan sent for order {order_id}")
-
-    except Exception as e:
-        logger.error(f"Error generating plan for order {order_id}: {e}")
-        await message.answer(
-            "⚠️ Ошибка при генерации программы.\n"
-            "Напиши нам — вышлем вручную: @support"
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════════
-#  ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ
-# ══════════════════════════════════════════════════════════════════════════════════
-
-@dp.message(F.text == "/myorders")
-async def cmd_myorders(message: types.Message):
-    orders = await db.get_user_orders(message.from_user.id)
-    if not orders:
-        await message.answer("У тебя пока нет заказов. Начни с /start")
-        return
-
-    text = "📋 <b>Твои заказы:</b>\n\n"
-    for o in orders[-5:]:
-        emoji = "✅" if o["status"] == "paid" else "⏳"
-        text += f"{emoji} #{o['id']} — {o['goal']} — {o['status']}\n"
-
-    await message.answer(text, parse_mode="HTML")
-
-
-@dp.message(F.text == "/help")
-async def cmd_help(message: types.Message):
-    await message.answer(
-        "ℹ️ <b>Команды бота:</b>\n\n"
-        "/start — начать и получить программу\n"
-        "/myorders — мои заказы\n"
-        "/help — справка\n\n"
-        "💳 Оплата через Telegram Stars — безопасно и мгновенно.",
-        parse_mode="HTML"
+    plan = await generate_workout_plan(
+        age=order["age"],
+        height=order["height"],
+        weight=order["weight"],
+        goal=order["goal"],
     )
 
+    await message.answer(plan)
 
-# ══════════════════════════════════════════════════════════════════════════════════
-#  ЗАПУСК
-# ══════════════════════════════════════════════════════════════════════════════════
 
+# ===== RENDER SERVER (ДОБАВИЛ) =====
+async def handle(request):
+    return web.Response(text="Bot is running")
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get('/', handle)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+
+# ===== ЗАПУСК =====
 async def main():
     await db.init()
-    logger.info("Bot started with Telegram Stars payment")
+    logger.info("Bot started")
+
+    asyncio.create_task(start_web())  # ← КЛЮЧЕВОЕ
+
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+```
